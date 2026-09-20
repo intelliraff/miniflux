@@ -1,0 +1,17 @@
+torch
+torchvision
+torchaudio
+
+numpy
+scipy
+pillow
+matplotlib
+tqdm
+einops
+
+transformers
+datasets
+accelerate
+
+jupyter
+ipykernel

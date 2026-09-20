@@ -1,0 +1,21 @@
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Training outputs
+outputs/
+
+# Datasets
+data/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# macOS
+.DS_Store
