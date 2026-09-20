@@ -14,6 +14,7 @@ from torchvision.utils import save_image
 
 from models.cifar_reference import REFERENCE, COMMIT, reference_components
 from models.cifar_miniflux import CifarMiniFlux
+from models.cifar_hierarchical_miniflux import HierarchicalCifarMiniFlux
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -44,9 +45,15 @@ def main():
     p.add_argument('--microbatch',type=int,default=8)
     p.add_argument('--seed',type=int,default=42)
     p.add_argument('--device',choices=['cpu','mps','cuda'],default='mps')
-    p.add_argument('--models',nargs='+',choices=['reference','miniflux'],default=['reference','miniflux'])
+    p.add_argument('--models',nargs='+',choices=['reference','miniflux','hierarchical'],default=['reference','miniflux'])
     p.add_argument('--resume',action='store_true')
     p.add_argument('--max-updates',type=int,default=0,help='Optional smoke-test cap per model')
+    p.add_argument(
+        '--target-epochs',
+        type=float,
+        default=0.0,
+        help='Optional cumulative epoch target per model; zero disables it',
+    )
     a=p.parse_args()
     if a.microbatch<1 or a.batch_size%a.microbatch or a.budget_seconds<30:
         p.error('budget >=30 seconds and batch size divisible by positive microbatch required')
@@ -93,7 +100,12 @@ def main():
         phase_deadline=time.monotonic()+remaining/(len(a.models)-model_index)
         out=a.output/name; out.mkdir(exist_ok=True)
         torch.manual_seed(a.seed)
-        base=(cls(**reference_config) if name=='reference' else CifarMiniFlux()).to(device)
+        constructors={
+            'reference': lambda: cls(**reference_config),
+            'miniflux': CifarMiniFlux,
+            'hierarchical': HierarchicalCifarMiniFlux,
+        }
+        base=constructors[name]().to(device)
         model=EMA(base).to(device)
         optimizer=torch.optim.AdamW(base.parameters(),lr=1e-4,betas=(.9,.95),weight_decay=.01)
         train_rng=torch.Generator().manual_seed(a.seed+10)
@@ -158,6 +170,7 @@ def main():
             last_eval=step; max_update_seconds=0.; running=0.; logged=0
             while time.monotonic()<phase_deadline-max(30.,eval_duration*1.5+10.,max_update_seconds*2):
                 if a.max_updates and step-start_step>=a.max_updates: break
+                if a.target_epochs and exposures >= a.target_epochs * len(train_pixels): break
                 tick=time.monotonic()
                 if len(order)<a.batch_size:
                     # Keep all examples; complete the batch from a fresh permutation.

@@ -19,10 +19,42 @@ Continue both saved checkpoints for another 30-minute budget:
   --device mps --output outputs/cifar_benchmark --budget-seconds 1800 --resume
 ```
 
+Continue only MiniFlux until a cumulative epoch target, with a wall-clock safety
+limit:
+
+```sh
+.venv/bin/python -m experiments.cifar_benchmark \
+  --device mps --output outputs/cifar_benchmark --budget-seconds 9000 \
+  --models miniflux --resume --target-epochs 25
+```
+
 The budget includes initialization, training, evaluation, sampling, and checkpoint
 I/O. It is divided fairly over the requested model phases. `--resume` restores model,
 EMA, optimizer, batch order, and random-generator states. It requires the same seed,
 batch size, microbatch size, and pinned reference revision.
+
+## Hierarchical MiniFlux pilot
+
+The hierarchical model uses transformer blocks at 16x16 and 8x8, with convolutional
+resolution changes and a skip connection. A fresh equal-time MPS pilot used this
+command:
+
+```sh
+PYTHONPATH=. .venv/bin/python -u experiments/cifar_benchmark.py \
+  --models miniflux hierarchical \
+  --output outputs/cifar_hierarchical_pilot_mps \
+  --budget-seconds 1800 --device mps
+```
+
+| Model | Parameters | Updates | Epochs | EMA test velocity MSE | 16-image sample time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Flat MiniFlux | 6,581,004 | 1,183 | 1.514 | 0.21788 | 6.61 s |
+| Hierarchical MiniFlux | 7,374,979 | 1,512 | 1.935 | 0.22276 | 3.79 s |
+
+The hierarchy processed 28% more updates and sampled 43% faster, but its final MSE
+was 2.2% higher. Both sample grids remained immature after fewer than two epochs.
+This pilot supports retaining the model for a longer checkpointed experiment, but
+does not establish a quality improvement over the flat transformer.
 
 Create the comparison plot and written assessment after a completed run:
 

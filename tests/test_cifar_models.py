@@ -3,6 +3,7 @@ import unittest
 import torch
 
 from models.cifar_miniflux import CifarMiniFlux
+from models.cifar_hierarchical_miniflux import HierarchicalCifarMiniFlux
 from models.cifar_reference import make_reference, reference_components
 from models.flow_matching import sample_flow_path
 
@@ -29,6 +30,26 @@ class CifarModelTests(unittest.TestCase):
         output = compact(x, torch.tensor([0.2, 0.8]), extra={})
         self.assertEqual(output.shape, x.shape)
         self.assertTrue(torch.isfinite(output).all())
+
+    def test_hierarchical_miniflux_shape_gradients_and_size(self):
+        model = HierarchicalCifarMiniFlux(
+            base_dim=32,
+            bottleneck_dim=64,
+            encoder_depth=1,
+            bottleneck_depth=1,
+            decoder_depth=1,
+        )
+        x = torch.randn(2, 3, 32, 32)
+        output = model(x, torch.tensor([0.2, 0.8]), extra={})
+        self.assertEqual(output.shape, x.shape)
+        self.assertTrue(torch.isfinite(output).all())
+        output.square().mean().backward()
+        self.assertIsNotNone(model.output.weight.grad)
+
+        full_model = HierarchicalCifarMiniFlux()
+        parameters = sum(parameter.numel() for parameter in full_model.parameters())
+        self.assertGreater(parameters, 6_000_000)
+        self.assertLess(parameters, 10_000_000)
 
 
 if __name__ == "__main__":
