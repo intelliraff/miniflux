@@ -15,6 +15,7 @@ from torchvision.utils import save_image
 from models.cifar_reference import REFERENCE, COMMIT, reference_components
 from models.cifar_miniflux import CifarMiniFlux
 from models.cifar_hierarchical_miniflux import HierarchicalCifarMiniFlux
+from models.cifar_hybrid_miniflux import CifarHybridMiniFlux
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -45,7 +46,7 @@ def main():
     p.add_argument('--microbatch',type=int,default=8)
     p.add_argument('--seed',type=int,default=42)
     p.add_argument('--device',choices=['cpu','mps','cuda'],default='mps')
-    p.add_argument('--models',nargs='+',choices=['reference','miniflux','hierarchical'],default=['reference','miniflux'])
+    p.add_argument('--models',nargs='+',choices=['reference','miniflux','hierarchical','hybrid'],default=['reference','miniflux'])
     p.add_argument('--resume',action='store_true')
     p.add_argument('--max-updates',type=int,default=0,help='Optional smoke-test cap per model')
     p.add_argument(
@@ -104,6 +105,7 @@ def main():
             'reference': lambda: cls(**reference_config),
             'miniflux': CifarMiniFlux,
             'hierarchical': HierarchicalCifarMiniFlux,
+            'hybrid': CifarHybridMiniFlux,
         }
         base=constructors[name]().to(device)
         model=EMA(base).to(device)

@@ -56,6 +56,20 @@ was 2.2% higher. Both sample grids remained immature after fewer than two epochs
 This pilot supports retaining the model for a longer checkpointed experiment, but
 does not establish a quality improvement over the flat transformer.
 
+## Local-global hybrid at five epochs
+
+The hybrid keeps five modulated transformer blocks at the 8x8 global bottleneck and
+uses small conditioned residual convolution blocks at 16x16 and 32x32. It has
+8,449,347 parameters. Training was resumed until exactly 5.00096 equivalent epochs
+(3,907 updates) using `--models hybrid --target-epochs 5 --resume`.
+
+At the matched 3,900-update evaluation, the flat MiniFlux had 0.19589 EMA test
+velocity MSE. The hybrid finished at 0.19021, a 2.9% reduction. Its final 16-image
+sample took 3.71 seconds versus 6.02 seconds for the flat model at step 3,900. The
+fixed-noise grids remain visually similar and only partly recognizable, so this is
+evidence of better compute efficiency and optimization rather than proof of a large
+perceptual-quality improvement.
+
 Create the comparison plot and written assessment after a completed run:
 
 ```sh
