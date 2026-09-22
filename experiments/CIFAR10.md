@@ -185,3 +185,30 @@ silhouettes and backgrounds compared with five epochs, but the 32x32 images rema
 soft and lack fine detail. Stop at ten epochs; do not continue to 25. The next
 experiment should use the successful strong conditioning in a suitable pretrained
 latent space and include a reliable classifier/FID evaluator.
+
+## Pretrained-prior LoRA quality experiment
+
+A scratch-trained 8.35M latent MiniFlux was also evaluated on a deterministic
+900/100 split of the local 1,000-image captioned COCO subset. Its frozen
+`sd-vae-ft-mse` reconstructions were sharp, but generated samples remained abstract
+after 2,000 updates even as validation velocity MSE fell from 1.61312 to 0.99251.
+This isolates the denoising prior, rather than the VAE decoder, as the quality
+bottleneck for that experiment.
+
+The next quality gate therefore used the pretrained Stable Diffusion 1.5 denoiser
+with a rank-4 attention LoRA. Only 797,184 parameters are trainable; the VAE, text
+encoder, and base UNet remain frozen. The run used 256px training crops, four-way
+gradient accumulation, BF16, and generated fixed-seed validation samples at 512px:
+
+```sh
+PYTHONPATH=. .venv/bin/python -u -m experiments.sd_lora_quality \
+  --output outputs/sd15_lora_quality_200 --steps 200 --sample-every 100
+```
+
+On the RTX A4000, training and evaluation took 256 seconds and peaked at 2.63 GiB
+of allocated CUDA memory. The final LoRA file is 1.56 MiB. Fixed-prompt samples at
+step 200 are crisp and recognizable, with clear zebras, an adaptive tricycle,
+motorcycle riders, and a shepherd with sheep. This is a decisive visual improvement
+over both the pixel-space CIFAR runs and the scratch-trained latent pilot. Preserve
+the 200-step adapter as the current quality checkpoint; longer training should be
+judged with additional held-out prompts for dataset overfitting and prior drift.
