@@ -56,8 +56,8 @@ def main():
     plt.close(fig)
 
     guidance_rows=[]
-    if config.get("conditioning")=="class-conditioned" and "conditioned_hybrid" in summary:
-        name="conditioned_hybrid"; step=summary[name]["steps"]; model_dir=args.run/name
+    if config.get("conditioning")=="class-conditioned" and len(summary)==1:
+        name=next(iter(summary)); step=summary[name]["steps"]; model_dir=args.run/name
         baseline=None
         for scale in config["guidance_scales"]:
             artifact=model_dir/f"samples_step{step:07d}_guidance{scale:g}.pt"

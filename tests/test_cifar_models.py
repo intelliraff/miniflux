@@ -6,6 +6,7 @@ from models.cifar_miniflux import CifarMiniFlux
 from models.cifar_hierarchical_miniflux import HierarchicalCifarMiniFlux
 from models.cifar_hybrid_miniflux import CifarHybridMiniFlux
 from models.cifar_conditioned_hybrid_miniflux import ConditionedCifarHybridMiniFlux
+from models.cifar_strong_conditioned_hybrid_miniflux import StrongConditionedCifarHybridMiniFlux
 from experiments.cifar_benchmark import guided_velocity, heun_sample
 from models.cifar_reference import make_reference, reference_components
 from models.flow_matching import sample_flow_path
@@ -52,6 +53,20 @@ class CifarModelTests(unittest.TestCase):
         mask=torch.rand((4,),generator=torch.Generator().manual_seed(5))<1.0
         labels=labels.clone(); labels[mask]=ConditionedCifarHybridMiniFlux.NULL_CLASS
         self.assertTrue(torch.equal(labels,torch.full((4,),10)))
+
+    def test_strong_conditioning_is_direct_and_under_parameter_budget(self):
+        model=StrongConditionedCifarHybridMiniFlux(local_dim=16,base_dim=32,bottleneck_dim=64,bottleneck_depth=1,class_rank=8)
+        model.output[-1].weight.data.normal_(std=.01)
+        x=torch.randn(2,3,32,32); t=torch.tensor([.25,.75])
+        first=model(x,t,labels=torch.tensor([0,1]))
+        second=model(x,t,labels=torch.tensor([2,3]))
+        null=model(x,t)
+        self.assertEqual(first.shape,x.shape)
+        self.assertTrue(torch.isfinite(first).all())
+        self.assertFalse(torch.allclose(first,second))
+        self.assertEqual(null.shape,x.shape)
+        full=StrongConditionedCifarHybridMiniFlux()
+        self.assertLess(sum(p.numel() for p in full.parameters()),10_000_000)
 
     def test_official_path_matches_project_equations(self):
         _, _, _, _, path_class = reference_components()

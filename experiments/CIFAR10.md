@@ -150,3 +150,38 @@ more training; if direct-pixel samples remain blurry after that revision, move t
 conditioned hybrid into a suitable frozen pretrained latent space. FID and
 pretrained-classifier accuracy were unavailable for this run and are recorded as
 missing rather than inferred from velocity MSE.
+
+## Strong per-block class modulation
+
+The follow-up `strong_conditioned_hybrid` keeps time modulation separate and adds
+low-rank class modulation directly to every convolutional residual block and every
+transformer AdaLN shift, scale, and residual gate. It has 8,875,875 parameters.
+A 200-update CUDA smoke test reached 0.35587 EMA velocity MSE with a 0.01051
+conditional/null velocity MAE, so it proceeded to the five-epoch gate.
+
+At exactly five epochs, EMA MSE was 0.18938 and conditional/null velocity MAE was
+0.02204, over twice the earlier conditioned model's 0.00951 measured checkpoint
+separation. Guidance 3.0 produced substantially clearer class rows, particularly
+airplanes, automobiles, birds, horses, ships, and trucks. Because this satisfied
+the perceptual decision rule, the preserved five-epoch checkpoint was continued
+to exactly ten epochs. The five-epoch checkpoint is saved as `checkpoint_5ep.pt`.
+
+The ten-epoch endpoint used 7,814 updates and exactly 500,000 examples. EMA MSE
+finished at 0.18234 and conditional/null velocity MAE at 0.02269. Guidance-scale
+metrics at ten epochs were:
+
+| Guidance | Edge energy | Within-class diversity | Sampling time (40 images) |
+| ---: | ---: | ---: | ---: |
+| 0.0 | 0.13171 | 0.68052 | 3.95 s |
+| 1.0 | 0.13134 | 0.67041 | 7.81 s |
+| 1.5 | 0.13132 | 0.66587 | 7.83 s |
+| 2.0 | 0.13069 | 0.66146 | 7.80 s |
+| 3.0 | 0.12980 | 0.65653 | 7.79 s |
+| 4.0 | 0.13066 | 0.65553 | 7.83 s |
+
+Guidance 3.0 remains the recommended balance. Scale 4 produces the strongest class
+templates but repeats layouts and loses additional diversity. Ten epochs refine
+silhouettes and backgrounds compared with five epochs, but the 32x32 images remain
+soft and lack fine detail. Stop at ten epochs; do not continue to 25. The next
+experiment should use the successful strong conditioning in a suitable pretrained
+latent space and include a reliable classifier/FID evaluator.

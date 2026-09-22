@@ -20,6 +20,7 @@ from models.cifar_miniflux import CifarMiniFlux
 from models.cifar_hierarchical_miniflux import HierarchicalCifarMiniFlux
 from models.cifar_hybrid_miniflux import CifarHybridMiniFlux
 from models.cifar_conditioned_hybrid_miniflux import ConditionedCifarHybridMiniFlux
+from models.cifar_strong_conditioned_hybrid_miniflux import StrongConditionedCifarHybridMiniFlux
 
 ROOT=Path(__file__).resolve().parents[1]
 CIFAR10_CLASSES=('airplane','automobile','bird','cat','deer','dog','frog','horse','ship','truck')
@@ -92,7 +93,7 @@ def main():
     p.add_argument('--microbatch',type=int,default=8)
     p.add_argument('--seed',type=int,default=42)
     p.add_argument('--device',choices=['cpu','mps','cuda'],default=None)
-    p.add_argument('--models',nargs='+',choices=['reference','miniflux','hierarchical','hybrid','conditioned_hybrid'],default=['reference','miniflux'])
+    p.add_argument('--models',nargs='+',choices=['reference','miniflux','hierarchical','hybrid','conditioned_hybrid','strong_conditioned_hybrid'],default=['reference','miniflux'])
     p.add_argument('--resume',action='store_true')
     p.add_argument('--max-updates',type=int,default=0,help='Optional smoke-test cap per model')
     p.add_argument(
@@ -136,7 +137,8 @@ def main():
     grid=schedule(nfes=50).float()
     a.output.mkdir(parents=True,exist_ok=True)
     config={k:str(v) if isinstance(v,Path) else v for k,v in vars(a).items()}
-    config.update(device=str(device),reference_commit=COMMIT,reference_config=reference_config,platform=platform.platform(),torch_version=str(torch.__version__),train_examples=len(train_pixels),test_examples=len(test_pixels),evaluation_test_indices=eval_ids.tolist(),optimizer={'lr':1e-4,'betas':[.9,.95],'weight_decay':.01},sampling_intervals=50,sampling_model_evaluations=100,sampling_start_time=float(grid[0]),precision='float32' if device.type!='cuda' else ('bfloat16' if torch.cuda.is_bf16_supported() else 'float16'),conditioning='class-conditioned' if 'conditioned_hybrid' in a.models else 'unconditional',conditioning_dropout=a.conditioning_dropout)
+    conditioned_names={'conditioned_hybrid','strong_conditioned_hybrid'}
+    config.update(device=str(device),reference_commit=COMMIT,reference_config=reference_config,platform=platform.platform(),torch_version=str(torch.__version__),train_examples=len(train_pixels),test_examples=len(test_pixels),evaluation_test_indices=eval_ids.tolist(),optimizer={'lr':1e-4,'betas':[.9,.95],'weight_decay':.01},sampling_intervals=50,sampling_model_evaluations=100,sampling_start_time=float(grid[0]),precision='float32' if device.type!='cuda' else ('bfloat16' if torch.cuda.is_bf16_supported() else 'float16'),conditioning='class-conditioned' if any(name in conditioned_names for name in a.models) else 'unconditional',conditioning_dropout=a.conditioning_dropout)
     if a.resume:
         original=json.loads((a.output/'config.json').read_text())
         for key in ('seed','batch_size','microbatch','reference_commit','conditioning_dropout','guidance_scales'):
@@ -149,8 +151,8 @@ def main():
         elif device.type=='cuda': torch.cuda.synchronize()
     benchmark_started=time.monotonic()
     global_deadline=benchmark_started+a.budget_seconds
-    if a.exact_target and ('conditioned_hybrid' not in a.models or len(a.models)!=1 or a.target_epochs<=0):
-        p.error('--exact-target requires only conditioned_hybrid and positive --target-epochs')
+    if a.exact_target and (a.models[0] not in conditioned_names or len(a.models)!=1 or a.target_epochs<=0):
+        p.error('--exact-target requires one conditioned model and positive --target-epochs')
     print(f'Benchmark: {a.budget_seconds:.0f}s total budget; full CIFAR-10; {device}',flush=True)
     for model_index,name in enumerate(a.models):
         # Includes model initialization, training, periodic evaluation and checkpoint I/O.
@@ -164,11 +166,13 @@ def main():
             'hierarchical': HierarchicalCifarMiniFlux,
             'hybrid': CifarHybridMiniFlux,
             'conditioned_hybrid': ConditionedCifarHybridMiniFlux,
+            'strong_conditioned_hybrid': StrongConditionedCifarHybridMiniFlux,
         }
         base=constructors[name]().to(device)
+        conditioned=name in conditioned_names
         model=EMA(base).to(device)
         amp_dtype=(torch.bfloat16 if device.type=='cuda' and torch.cuda.is_bf16_supported() else torch.float16)
-        use_amp=device.type=='cuda' and name=='conditioned_hybrid'
+        use_amp=device.type=='cuda' and conditioned
         scaler=torch.amp.GradScaler('cuda',enabled=use_amp and amp_dtype==torch.float16)
         optimizer=torch.optim.AdamW(base.parameters(),lr=1e-4,betas=(.9,.95),weight_decay=.01)
         train_rng=torch.Generator().manual_seed(a.seed+10)
@@ -199,7 +203,7 @@ def main():
         @torch.no_grad()
         def evaluate():
             model.eval()
-            loss_sum=0.
+            loss_sum=0.; class_delta_sum=0.
             guidance_metrics=[]
             for start in range(0,len(eval_data),a.microbatch):
                 target=eval_data[start:start+a.microbatch].to(device)
@@ -208,11 +212,15 @@ def main():
                 sampled=path.sample(x_0=noise,x_1=target,t=t)
                 chunk_labels=test_targets[eval_ids[start:start+a.microbatch]].to(device)
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-                    prediction=(model(sampled.x_t,t,labels=chunk_labels) if name=='conditioned_hybrid' else model(sampled.x_t,t,extra={}))
+                    prediction=(model(sampled.x_t,t,labels=chunk_labels) if conditioned else model(sampled.x_t,t,extra={}))
                     value=(prediction.float()-sampled.dx_t).square().flatten(1).mean(1)
+                    if conditioned:
+                        null_labels=torch.full_like(chunk_labels,base.NULL_CLASS)
+                        null_prediction=model(sampled.x_t,t,labels=null_labels)
+                        class_delta_sum+=(prediction.float()-null_prediction.float()).abs().flatten(1).mean(1).sum().item()
                 loss_sum+=value.sum().item(); memory_sample()
             images=[]; tick=time.monotonic()
-            if name=='conditioned_hybrid':
+            if conditioned:
                 # 4 samples per class gives a compact fixed balanced grid.
                 eval_labels_fixed=torch.arange(10).repeat_interleave(4)
                 (out/f'samples_step{step:07d}_labels.json').write_text(json.dumps({'class_names':CIFAR10_CLASSES,'label_order':eval_labels_fixed.tolist()},indent=2))
@@ -248,7 +256,7 @@ def main():
                 with metric_path.open('a') as handle:
                     for record in guidance_metrics: handle.write(json.dumps(record)+'\n')
             model.train(True)
-            return loss_sum/len(eval_data),sample_seconds
+            return loss_sum/len(eval_data),sample_seconds,(class_delta_sum/len(eval_data) if conditioned else None)
         def save_checkpoint():
             state={'model':model.state_dict(),'optimizer':optimizer.state_dict(),'scaler':scaler.state_dict(),'step':step,'exposures':exposures,'train_seconds':train_seconds,'order':order,'train_rng':train_rng.get_state(),'shuffle_rng':shuffle_rng.get_state(),'torch_rng':torch.get_rng_state(),'architecture':name,'config':config}
             if device.type=='mps': state['mps_rng']=torch.mps.get_rng_state()
@@ -261,9 +269,9 @@ def main():
             log,ev=csv.writer(lf),csv.writer(ef)
             if mode=='w':
                 log.writerow(['step','loss','exposures','training_seconds'])
-                ev.writerow(['step','ema_test_velocity_mse','sample16_seconds','phase_elapsed_seconds'])
-            eval_start=time.monotonic(); validation,sample_seconds=evaluate(); eval_duration=time.monotonic()-eval_start
-            ev.writerow([step,validation,sample_seconds,time.monotonic()-phase_start])
+                ev.writerow(['step','ema_test_velocity_mse','sample16_seconds','phase_elapsed_seconds','conditional_null_velocity_mae'])
+            eval_start=time.monotonic(); validation,sample_seconds,class_delta=evaluate(); eval_duration=time.monotonic()-eval_start
+            ev.writerow([step,validation,sample_seconds,time.monotonic()-phase_start,class_delta])
             last_eval=step; max_update_seconds=0.; running=0.; logged=0
             while (a.exact_target and exposures < a.target_epochs*len(train_pixels)) or (not a.exact_target and time.monotonic()<phase_deadline-max(30.,eval_duration*1.5+10.,max_update_seconds*2)):
                 if a.max_updates and step-start_step>=a.max_updates: break
@@ -287,12 +295,12 @@ def main():
                     data=target[start:start+a.microbatch].to(device); n=noise[start:start+a.microbatch].to(device); ts=t[start:start+a.microbatch].to(device)
                     sampled=path.sample(x_0=n,x_1=data,t=ts)
                     labels=None
-                    if name=='conditioned_hybrid':
+                    if conditioned:
                         labels=train_targets[ids[start:start+a.microbatch]].to(device)
                         drop=torch.rand((len(labels),),generator=train_rng)<a.conditioning_dropout
                         labels=labels.clone(); labels[drop]=base.NULL_CLASS
                     with torch.autocast(device_type=device.type,dtype=amp_dtype,enabled=use_amp):
-                        prediction=(model(sampled.x_t,ts,labels=labels) if name=='conditioned_hybrid' else model(sampled.x_t,ts,extra={}))
+                        prediction=(model(sampled.x_t,ts,labels=labels) if conditioned else model(sampled.x_t,ts,extra={}))
                         loss=(prediction.float()-sampled.dx_t).square().mean()
                     if not torch.isfinite(loss): raise RuntimeError(f'Nonfinite {name} loss at {step}')
                     if use_amp:
@@ -312,17 +320,17 @@ def main():
                     print(f'{name} step {step}, epochs {exposures/50000:.3f}, loss {running/logged:.4f}, update {elapsed:.2f}s, remaining {max(0,phase_deadline-time.monotonic()):.0f}s',flush=True)
                     running=0.; logged=0
                 completed_epoch = exposures//len(train_pixels) > (exposures-current_batch)//len(train_pixels)
-                evaluation_due = completed_epoch if name=='conditioned_hybrid' else step%100==0
+                evaluation_due = completed_epoch if conditioned else step%100==0
                 if evaluation_due and (a.exact_target or phase_deadline-time.monotonic()>eval_duration*2+30):
-                    tick=time.monotonic(); validation,sample_seconds=evaluate(); eval_duration=max(eval_duration,time.monotonic()-tick)
-                    ev.writerow([step,validation,sample_seconds,time.monotonic()-phase_start]); last_eval=step
+                    tick=time.monotonic(); validation,sample_seconds,class_delta=evaluate(); eval_duration=max(eval_duration,time.monotonic()-tick)
+                    ev.writerow([step,validation,sample_seconds,time.monotonic()-phase_start,class_delta]); last_eval=step
                     save_checkpoint()
                     print(f'{name} EMA evaluation {step}: {validation:.5f}',flush=True)
             if last_eval!=step:
-                validation,sample_seconds=evaluate()
-                ev.writerow([step,validation,sample_seconds,time.monotonic()-phase_start])
+                validation,sample_seconds,class_delta=evaluate()
+                ev.writerow([step,validation,sample_seconds,time.monotonic()-phase_start,class_delta])
             save_checkpoint()
-        result={'steps':step,'new_steps':step-start_step,'examples_seen':exposures,'equivalent_epochs':exposures/50000,'parameters':parameter_count,'float32_weight_bytes':parameter_count*4,'training_seconds_cumulative':train_seconds,'phase_seconds':time.monotonic()-phase_start,'final_ema_test_velocity_mse':validation,'sample16_seconds':sample_seconds,'sampling_model_evaluations':100,'sampled_allocated_tensor_bytes':sampled_memory,'memory_note':'MPS allocation sampled after microbatch backward/evaluation; includes model, EMA, optimizer and evaluation backups; lower bound on peak, excludes allocator cache. CUDA uses allocator peak.','status':'budget-limited pilot; not a published-quality reproduction'}
+        result={'steps':step,'new_steps':step-start_step,'examples_seen':exposures,'equivalent_epochs':exposures/50000,'parameters':parameter_count,'float32_weight_bytes':parameter_count*4,'training_seconds_cumulative':train_seconds,'phase_seconds':time.monotonic()-phase_start,'final_ema_test_velocity_mse':validation,'final_conditional_null_velocity_mae':class_delta,'sample16_seconds':sample_seconds,'sampling_model_evaluations':100,'sampled_allocated_tensor_bytes':sampled_memory,'memory_note':'MPS allocation sampled after microbatch backward/evaluation; includes model, EMA, optimizer and evaluation backups; lower bound on peak, excludes allocator cache. CUDA uses allocator peak.','status':'budget-limited pilot; not a published-quality reproduction'}
         summary[name]=result; summary_path.write_text(json.dumps(summary,indent=2))
         print(f'{name} finished: {json.dumps(result)}',flush=True)
         del base,model,optimizer
