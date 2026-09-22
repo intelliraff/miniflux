@@ -86,10 +86,14 @@ class CifarHybridMiniFlux(nn.Module):
 
     def forward(self, x, timesteps, extra=None):
         del extra
+        condition = self.time_embedding(timesteps * 1000.0)
+        return self.forward_conditioned(x, condition)
+
+    def forward_conditioned(self, x, condition):
+        """Run the unchanged hybrid backbone with a pre-combined condition."""
         batch, channels, height, width = x.shape
         if channels != 3 or height % 4 or width % 4:
             raise ValueError("requires RGB dimensions divisible by four")
-        condition = self.time_embedding(timesteps * 1000.0)
 
         local = self.local_encoder(self.input_projection(x), condition)
         base = self.base_encoder(self.down_to_base(local), condition)

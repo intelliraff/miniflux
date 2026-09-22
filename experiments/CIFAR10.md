@@ -82,3 +82,71 @@ Heun integration, which costs 100 model evaluations. Reported MPS memory is samp
 allocated tensor memory, excludes allocator cache, and is a lower bound on peak.
 The run does not compute FID and should not be compared directly with Meta's
 published 1,800-epoch result.
+
+## Class-conditioned local-global hybrid
+
+`ConditionedCifarHybridMiniFlux` is a separate 8.45M-parameter architecture. It
+uses CIFAR-10 class labels plus a learned null label; training replaces labels
+with null at probability 0.15. The shared timestep/class vector conditions the
+same residual convolution and 8x8 modulated transformer blocks as the existing
+hybrid. Existing `hybrid` checkpoints and sampling remain unchanged.
+
+Run a 200-update smoke test first, using a fresh output directory:
+
+```sh
+PYTHONPATH=. python -m experiments.cifar_benchmark \
+  --device cuda --models conditioned_hybrid \
+  --output outputs/cuda_conditioned_hybrid \
+  --budget-seconds 1800 --max-updates 200
+```
+
+After verifying finite samples and falling loss, resume to five epochs with:
+
+```sh
+PYTHONPATH=. python -m experiments.cifar_benchmark \
+  --device cuda --models conditioned_hybrid \
+  --output outputs/cuda_conditioned_hybrid --resume \
+  --budget-seconds 1800 --target-epochs 5 --exact-target
+```
+
+The experiment checkpoints model, EMA, optimizer, scaler,
+data order, and CPU/CUDA random states. CUDA uses BF16 when available and FP16
+with GradScaler otherwise. The benchmark generates the same balanced class labels
+and fixed initial noise for each guidance scale (0, 1, 1.5, 2, 3, 4), with Heun
+guidance on both predictor and corrector evaluations. Each evaluation writes a
+class-label manifest and per-scale image grids under
+`outputs/cuda_conditioned_hybrid/conditioned_hybrid/`.
+
+### Five-epoch CUDA result
+
+The clean primary run is in `outputs/cuda_conditioned_hybrid_5ep_pty`. It used an
+RTX A4000 with BF16 autocasting, trained from scratch for exactly 250,000 examples
+(3,907 updates and 5.000 epochs), and reached 0.19027 EMA test velocity MSE. The
+8,452,163-parameter model used 321 MiB peak allocated CUDA tensor memory. Optimizer
+update time was 1,073 seconds and the full phase, including six-scale evaluations
+at every epoch, took 1,313 seconds.
+
+| Guidance | Edge energy | Within-class diversity | Sampling time (40 images) |
+| ---: | ---: | ---: | ---: |
+| 0.0 | 0.13473 | 0.68268 | 3.78 s |
+| 1.0 | 0.13417 | 0.67952 | 7.40 s |
+| 1.5 | 0.13395 | 0.67800 | 7.32 s |
+| 2.0 | 0.13380 | 0.67654 | 7.29 s |
+| 3.0 | 0.13372 | 0.67379 | 7.26 s |
+| 4.0 | 0.13385 | 0.67110 | 7.26 s |
+
+The balanced grids show some class organization, most clearly for automobiles,
+ships, horses, and broad animal silhouettes. They remain close to the original
+hybrid grids and guidance produces only subtle changes. Higher scales steadily
+reduce diversity without a visible gain in recognizability or sharpness. Scale
+1.0 is the conservative recommendation, but none of the tested scales establishes
+a convincing perceptual improvement over the unconditional model.
+
+Do not continue this run automatically to ten epochs. The five-epoch result does
+not satisfy the decision rule requiring clearer class structure or improved
+perceptual metrics. The next revision should strengthen how class information
+enters the network and add a reliable CIFAR-10 classifier/FID evaluator before
+more training; if direct-pixel samples remain blurry after that revision, move the
+conditioned hybrid into a suitable frozen pretrained latent space. FID and
+pretrained-classifier accuracy were unavailable for this run and are recorded as
+missing rather than inferred from velocity MSE.

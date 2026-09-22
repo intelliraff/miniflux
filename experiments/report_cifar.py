@@ -7,6 +7,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import torch
 
 
 def read_csv(path):
@@ -19,9 +20,10 @@ def main():
     parser.add_argument("run", type=Path)
     args = parser.parse_args()
     summary = json.loads((args.run / "summary.json").read_text())
+    config = json.loads((args.run / "config.json").read_text())
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-    for name in ("reference", "miniflux"):
+    for name in summary:
         losses = read_csv(args.run / name / "loss.csv")
         evaluations = read_csv(args.run / name / "evaluation.csv")
         axes[0].plot(
@@ -53,44 +55,54 @@ def main():
     fig.savefig(args.run / "comparison.png", dpi=160)
     plt.close(fig)
 
-    ref, mini = summary["reference"], summary["miniflux"]
-    mini_session_hours = mini["phase_seconds"] / 3600
-    report = f"""# CIFAR-10 flow-matching pilot
+    guidance_rows=[]
+    if config.get("conditioning")=="class-conditioned" and "conditioned_hybrid" in summary:
+        name="conditioned_hybrid"; step=summary[name]["steps"]; model_dir=args.run/name
+        baseline=None
+        for scale in config["guidance_scales"]:
+            artifact=model_dir/f"samples_step{step:07d}_guidance{scale:g}.pt"
+            saved=torch.load(artifact,map_location="cpu",weights_only=False)
+            images=saved["images"].float(); labels=saved["labels"]
+            if baseline is None: baseline=images
+            edge=((images[:,:,:,1:]-images[:,:,:,:-1]).abs().mean()+(images[:,:,1:,:]-images[:,:,:-1,:]).abs().mean()).item()/2
+            diversity=[]
+            for class_id in range(10):
+                flat=images[labels==class_id].flatten(1)
+                diversity.append(torch.pdist(flat).mean().item()/(flat.shape[1]**0.5))
+            metadata=json.loads(artifact.with_suffix(".json").read_text())
+            guidance_rows.append({"guidance_scale":scale,"edge_energy":edge,"class_diversity":sum(diversity)/len(diversity),"mean_absolute_delta_from_scale_0":(images-baseline).abs().mean().item(),"sampling_seconds":metadata["sampling_seconds"]})
+        with (args.run/"guidance_metrics.csv").open("w",newline="") as handle:
+            writer=csv.DictWriter(handle,fieldnames=guidance_rows[0].keys()); writer.writeheader(); writer.writerows(guidance_rows)
+        fig,axes=plt.subplots(1,2,figsize=(10,4))
+        scales=[row["guidance_scale"] for row in guidance_rows]
+        axes[0].plot(scales,[row["edge_energy"] for row in guidance_rows],marker="o",label="edge energy")
+        axes[0].plot(scales,[row["class_diversity"] for row in guidance_rows],marker="o",label="class diversity")
+        axes[1].plot(scales,[row["mean_absolute_delta_from_scale_0"] for row in guidance_rows],marker="o")
+        axes[0].set(xlabel="Guidance scale",title="Sharpness and diversity"); axes[0].legend()
+        axes[1].set(xlabel="Guidance scale",ylabel="Mean absolute pixel delta",title="Change from null conditioning")
+        for axis in axes: axis.grid(alpha=.2)
+        fig.tight_layout(); fig.savefig(args.run/"guidance_metrics.png",dpi=160); plt.close(fig)
 
-The initial run was a 30-minute wall-clock comparison on the local Mac GPU. The
-MiniFlux checkpoint was subsequently continued in a {mini_session_hours:.2f}-hour
-resumable session, so the final rows below are no longer an equal-time quality
-comparison. Both models used the full CIFAR-10 training set, identical unconditional
-conditional-OT flow matching, skewed timestep sampling, horizontal flips, AdamW,
-EMA evaluation, and a fixed 50-interval Heun sampler. This is an early-training and
-efficiency study, not a reproduction of Meta's published CIFAR-10 quality result.
+    rows = "\n".join(
+        f"| {name} | {value['parameters']:,} | {value['steps']:,} | "
+        f"{value['equivalent_epochs']:.3f} | {value['final_ema_test_velocity_mse']:.5f} | "
+        f"{value['sample16_seconds']:.2f}s | {value['sampled_allocated_tensor_bytes']/2**20:.0f} MiB |"
+        for name, value in summary.items()
+    )
+    conditioning=config.get("conditioning","unconditional")
+    report = f"""# CIFAR-10 flow-matching benchmark
 
-| Measurement | Meta reference U-Net | Pixel MiniFlux |
-|---|---:|---:|
-| Parameters | {ref['parameters']:,} | {mini['parameters']:,} |
-| Updates | {ref['steps']:,} | {mini['steps']:,} |
-| Equivalent epochs | {ref['equivalent_epochs']:.3f} | {mini['equivalent_epochs']:.3f} |
-| Final fixed held-out velocity MSE | {ref['final_ema_test_velocity_mse']:.4f} | {mini['final_ema_test_velocity_mse']:.4f} |
-| 16-image sampling time, 100 model evaluations | {ref['sample16_seconds']:.2f}s | {mini['sample16_seconds']:.2f}s |
-| Sampled allocated tensor memory (lower bound) | {ref['sampled_allocated_tensor_bytes']/2**20:.0f} MiB | {mini['sampled_allocated_tensor_bytes']/2**20:.0f} MiB |
+All listed models used the full CIFAR-10 training set, {conditioning} conditional-OT
+flow matching, skewed timestep sampling, horizontal flips, AdamW, EMA evaluation,
+and the fixed 50-interval Heun sampler.
 
-The flow equations are validated against Meta's official `CondOTProbPath`. The
-reference learns faster per example in the initial matched pilot. MiniFlux processes
-many more examples per second, reaches a lower held-out velocity loss after its
-additional training, samples about {ref['sample16_seconds']/mini['sample16_seconds']:.1f}x faster,
-and uses about {ref['parameters']/mini['parameters']:.1f}x fewer parameters.
+| Model | Parameters | Updates | Epochs | Final EMA test MSE | Sample 16 | Peak allocated |
+|---|---:|---:|---:|---:|---:|---:|
+{rows}
 
-Neither final grid contains consistently recognizable CIFAR objects yet. MiniFlux
-trained for only {mini['equivalent_epochs']:.2f} epochs, while Meta reports its
-published unconditional CIFAR-10 result after roughly 1,800 epochs. Velocity loss
-alone is not evidence of perceptual image quality.
-
-The useful conclusion is that the compact transformer can learn the unconditional
-pixel-space flow task. The earlier text-to-image failure is therefore more likely
-to involve training exposure, latent/text conditioning, or their interaction than
-a reversed flow equation. The next controlled milestone is to continue this
-resumable MiniFlux checkpoint until samples become recognizable, then add class
-conditioning before returning to free-form text and VAE latents.
+The flow equations are validated against Meta's official `CondOTProbPath`. Velocity
+loss is a training diagnostic and is not by itself evidence of perceptual image
+quality; inspect the fixed-noise grids alongside this report.
 """
     (args.run / "assessment.md").write_text(report)
     print(report)
